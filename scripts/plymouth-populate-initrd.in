@@ -15,6 +15,7 @@
 [ -z "$PLYMOUTH_DAEMON_PATH" ] && PLYMOUTH_DAEMON_PATH="@PLYMOUTH_DAEMON_DIR@/plymouthd"
 [ -z "$PLYMOUTH_CLIENT_PATH" ] && PLYMOUTH_CLIENT_PATH="@PLYMOUTH_CLIENT_DIR@/plymouth"
 [ -z "$SYSTEMD_UNIT_DIR" ] && SYSTEMD_UNIT_DIR="@SYSTEMD_UNIT_DIR@"
+[ -z "$SUPPORTED_LANGUAGES" ] && SUPPORTED_LANGUAGES="pt fr de it ru es en zh ja ko zh as bn gu hi kn ml mr or pa ta te"
 
 # Generic substring function.  If $2 is in $1, return 0.
 strstr() { [ "${1#*$2*}" != "$1" ]; }
@@ -412,6 +413,24 @@ if [ -d ${PLYMOUTH_DATADIR}/plymouth/themes/${PLYMOUTH_THEME_NAME} ]; then
         [ ! -f "$x" ] && continue
         inst $x $INITRDDIR
     done
+fi
+
+fonts=""
+needs_graphics="$(find ${INITRDDIR} -name 'libply-splash-graphics.so*' -print -quit | grep -q libply-splash-graphics.so && echo -n 1)"
+
+if [ -n "$needs_graphics" ]; then
+    for lang in $SUPPORTED_LANGUAGES; do
+        font=$(fc-match "":lang="$lang" file | awk -F= '{ print $2}')
+        echo $fonts | grep -q "$font" && continue
+        fonts="$fonts $font"
+    done
+
+    if [ -n "$fonts" ]; then
+        inst ${PLYMOUTH_PLUGIN_PATH}/label.so $INITRDDIR
+        for font in $fonts; do
+            inst $font $INITRDDIR
+        done
+    fi
 fi
 
 if [ -L ${PLYMOUTH_DATADIR}/plymouth/themes/default.plymouth ]; then
