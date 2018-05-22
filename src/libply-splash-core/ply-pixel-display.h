@@ -43,6 +43,8 @@ typedef void (* ply_pixel_display_draw_handler_t) (void               *user_data
 #ifndef PLY_HIDE_FUNCTION_DECLARATIONS
 ply_pixel_display_t *ply_pixel_display_new (ply_renderer_t      *renderer,
                                             ply_renderer_head_t *head);
+ply_renderer_t      *ply_pixel_display_get_renderer (ply_pixel_display_t *display);
+ply_renderer_head_t *ply_pixel_display_get_renderer_head (ply_pixel_display_t *display);
 
 void ply_pixel_display_free (ply_pixel_display_t *display);
 

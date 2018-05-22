@@ -41,27 +41,37 @@
 #define SUBSYSTEM_DRM "drm"
 #define SUBSYSTEM_FRAME_BUFFER "graphics"
 
-static void create_seat_for_terminal_and_renderer_type (ply_device_manager_t *manager,
-                                                        const char           *device_path,
-                                                        ply_terminal_t       *terminal,
-                                                        ply_renderer_type_t   renderer_type);
+static void create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
+                                                           const char           *device_path,
+                                                           ply_terminal_t       *terminal,
+                                                           ply_renderer_type_t   renderer_type);
 struct _ply_device_manager
 {
   ply_device_manager_flags_t  flags;
   ply_event_loop_t           *loop;
   ply_hashtable_t            *terminals;
+  ply_hashtable_t            *renderers;
   ply_terminal_t             *local_console_terminal;
-  ply_seat_t                 *local_console_seat;
-  ply_list_t                 *seats;
+  ply_list_t                 *keyboards;
+  ply_list_t                 *text_displays;
+  ply_list_t                 *pixel_displays;
   struct udev                *udev_context;
   struct udev_queue          *udev_queue;
   int                         udev_queue_fd;
   ply_fd_watch_t             *udev_queue_fd_watch;
   struct udev_monitor        *udev_monitor;
 
-  ply_seat_added_handler_t    seat_added_handler;
-  ply_seat_removed_handler_t  seat_removed_handler;
-  void                       *seat_event_handler_data;
+  ply_keyboard_added_handler_t         keyboard_added_handler;
+  ply_keyboard_removed_handler_t       keyboard_removed_handler;
+  ply_pixel_display_added_handler_t    pixel_display_added_handler;
+  ply_pixel_display_removed_handler_t  pixel_display_removed_handler;
+  ply_text_display_added_handler_t     text_display_added_handler;
+  ply_text_display_removed_handler_t   text_display_removed_handler;
+  void                                *event_handler_data;
+
+  uint32_t                    local_console_managed : 1;
+  uint32_t                    local_console_is_text : 1;
+  uint32_t                    serial_consoles_detected : 1;
 };
 
 static void
@@ -88,67 +98,14 @@ attach_to_event_loop (ply_device_manager_t *manager,
 }
 
 static bool
-device_is_for_local_console (ply_device_manager_t *manager,
-                             struct udev_device   *device)
-{
-  const char *device_path;
-  struct udev_device *bus_device;
-  char *bus_device_path;
-  const char *boot_vga;
-  bool for_local_console;
-
-  /* Look at the associated bus device to see if this card is the
-   * card the kernel is using for its console. */
-  device_path = udev_device_get_syspath (device);
-  asprintf (&bus_device_path, "%s/device", device_path);
-  bus_device = udev_device_new_from_syspath (manager->udev_context, bus_device_path);
-
-  boot_vga = udev_device_get_sysattr_value (bus_device, "boot_vga");
-  free (bus_device_path);
-
-  if (boot_vga != NULL && strcmp (boot_vga, "1") == 0)
-    for_local_console = true;
-  else
-    for_local_console = false;
-
-  return for_local_console;
-}
-
-static bool
 drm_device_in_use (ply_device_manager_t *manager,
                    const char           *device_path)
 {
-  ply_list_node_t *node;
+  ply_renderer_t *renderer;
 
-  node = ply_list_get_first_node (manager->seats);
-  while (node != NULL)
-    {
-      ply_seat_t *seat;
-      ply_renderer_t *renderer;
-      ply_list_node_t *next_node;
-      const char *renderer_device_path;
+  renderer = ply_hashtable_lookup (manager->renderers, (void *) device_path);
 
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-      renderer = ply_seat_get_renderer (seat);
-
-      if (renderer != NULL)
-        {
-          renderer_device_path = ply_renderer_get_device_name (renderer);
-
-          if (renderer_device_path != NULL)
-            {
-              if (strcmp (device_path, renderer_device_path) == 0)
-                {
-                  return true;
-                }
-            }
-        }
-
-      node = next_node;
-    }
-
-  return false;
+  return renderer != NULL;
 }
 
 static bool
@@ -203,25 +160,17 @@ fb_device_has_drm_device (ply_device_manager_t *manager,
 }
 
 static void
-create_seat_for_udev_device (ply_device_manager_t *manager,
-                             struct udev_device   *device)
+create_devices_for_udev_device (ply_device_manager_t *manager,
+                                struct udev_device   *device)
 {
-  bool for_local_console;
   const char *device_path;
-  ply_terminal_t *terminal = NULL;
-
-  for_local_console = device_is_for_local_console (manager, device);
-
-  ply_trace ("device is for local console: %s", for_local_console? "yes" : "no");
-
-  if (for_local_console)
-    terminal = manager->local_console_terminal;
 
   device_path = udev_device_get_devnode (device);
 
   if (device_path != NULL)
     {
       const char *subsystem;
+
       ply_renderer_type_t renderer_type = PLY_RENDERER_TYPE_NONE;
 
       subsystem = udev_device_get_subsystem (device);
@@ -246,49 +195,46 @@ create_seat_for_udev_device (ply_device_manager_t *manager,
         }
 
       if (renderer_type != PLY_RENDERER_TYPE_NONE)
-        create_seat_for_terminal_and_renderer_type (manager,
-                                                    device_path,
-                                                    terminal,
-                                                    renderer_type);
+        {
+          ply_terminal_t *terminal = NULL;
+
+          if (!manager->local_console_managed)
+            {
+              terminal = manager->local_console_terminal;
+            }
+
+          create_devices_for_terminal_and_renderer_type (manager,
+                                                         device_path,
+                                                         terminal,
+                                                         renderer_type);
+       }
     }
 }
 
 static void
-free_seat_from_device_path (ply_device_manager_t *manager,
-                            const char           *device_path)
+free_displays_for_renderer (ply_device_manager_t *manager,
+                            ply_renderer_t       *renderer)
 {
   ply_list_node_t *node;
 
-  node = ply_list_get_first_node (manager->seats);
+  node = ply_list_get_first_node (manager->pixel_displays);
   while (node != NULL)
     {
-      ply_seat_t *seat;
-      ply_renderer_t *renderer;
       ply_list_node_t *next_node;
-      const char *renderer_device_path;
+      ply_pixel_display_t *display;
+      ply_renderer_t *display_renderer;
 
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-      renderer = ply_seat_get_renderer (seat);
+      display = ply_list_node_get_data (node);
+      next_node = ply_list_get_next_node (manager->pixel_displays, node);
+      display_renderer = ply_pixel_display_get_renderer (display);
 
-      if (renderer != NULL)
+      if (display_renderer == renderer)
         {
-          renderer_device_path = ply_renderer_get_device_name (renderer);
+          if (manager->pixel_display_removed_handler != NULL)
+            manager->pixel_display_removed_handler (manager->event_handler_data, display);
 
-          if (renderer_device_path != NULL)
-            {
-              if (strcmp (device_path, renderer_device_path) == 0)
-                {
-                  ply_trace ("removing seat associated with %s", device_path);
-
-                  if (manager->seat_removed_handler != NULL)
-                    manager->seat_removed_handler (manager->seat_event_handler_data, seat);
-
-                  ply_seat_free (seat);
-                  ply_list_remove_node (manager->seats, node);
-                  break;
-                }
-            }
+          ply_pixel_display_free (display);
+          ply_list_remove_node (manager->pixel_displays, node);
         }
 
       node = next_node;
@@ -296,26 +242,48 @@ free_seat_from_device_path (ply_device_manager_t *manager,
 }
 
 static void
-free_seat_for_udev_device (ply_device_manager_t *manager,
-                           struct udev_device   *device)
+free_devices_from_device_path (ply_device_manager_t *manager,
+                               const char           *device_path)
+{
+  char *key = NULL;
+  ply_renderer_t *renderer = NULL;
+
+  ply_hashtable_lookup_full (manager->renderers,
+                             (void *) device_path,
+                             (void **) &key,
+                             (void **) &renderer);
+
+  if (renderer == NULL)
+    return;
+
+  free_displays_for_renderer (manager, renderer);
+
+  ply_hashtable_remove (manager->renderers, (void *) device_path);
+  free (key);
+  ply_renderer_free (renderer);
+}
+
+static void
+free_devices_for_udev_device (ply_device_manager_t *manager,
+                              struct udev_device   *device)
 {
   const char *device_path;
 
   device_path = udev_device_get_devnode (device);
 
   if (device_path != NULL)
-    free_seat_from_device_path (manager, device_path);
+    free_devices_from_device_path (manager, device_path);
 }
 
 static bool
-create_seats_for_subsystem (ply_device_manager_t *manager,
-                            const char           *subsystem)
+create_devices_for_subsystem (ply_device_manager_t *manager,
+                               const char           *subsystem)
 {
   struct udev_enumerate *matches;
   struct udev_list_entry *entry;
   bool found_device = false;
 
-  ply_trace ("creating seats for %s devices",
+  ply_trace ("creating devices for %s devices",
              strcmp (subsystem, SUBSYSTEM_FRAME_BUFFER) == 0?
              "frame buffer":
              subsystem);
@@ -358,7 +326,7 @@ create_seats_for_subsystem (ply_device_manager_t *manager,
                 {
                   ply_trace ("found node %s", node);
                   found_device = true;
-                  create_seat_for_udev_device (manager, device);
+                  create_devices_for_udev_device (manager, device);
                 }
             }
           else
@@ -406,15 +374,10 @@ on_udev_event (ply_device_manager_t *manager)
       if (strcmp (subsystem, SUBSYSTEM_DRM) == 0 ||
           coldplug_complete)
         {
-          ply_list_t *local_pixel_displays = NULL;
-
-          if (manager->local_console_seat != NULL)
-            local_pixel_displays = ply_seat_get_pixel_displays (manager->local_console_seat);
-
-          if (coldplug_complete && manager->local_console_seat != NULL && local_pixel_displays == NULL)
+          if (coldplug_complete && manager->local_console_managed && manager->local_console_is_text)
             ply_trace ("ignoring since we're already using text splash for local console");
           else
-            create_seat_for_udev_device (manager, device);
+            create_devices_for_udev_device (manager, device);
         }
       else
         {
@@ -423,7 +386,7 @@ on_udev_event (ply_device_manager_t *manager)
     }
   else if (strcmp (action, "remove") == 0)
     {
-      free_seat_for_udev_device (manager, device);
+      free_devices_for_udev_device (manager, device);
     }
 
   udev_device_unref (device);
@@ -453,31 +416,6 @@ watch_for_udev_events (ply_device_manager_t *manager)
                            on_udev_event,
                            NULL,
                            manager);
-}
-
-static void
-free_seats (ply_device_manager_t *manager)
-{
-  ply_list_node_t *node;
-
-  ply_trace ("removing seats");
-  node = ply_list_get_first_node (manager->seats);
-  while (node != NULL)
-    {
-      ply_seat_t *seat;
-      ply_list_node_t *next_node;
-
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-
-      if (manager->seat_removed_handler != NULL)
-        manager->seat_removed_handler (manager->seat_event_handler_data, seat);
-
-      ply_seat_free (seat);
-      ply_list_remove_node (manager->seats, node);
-
-      node = next_node;
-    }
 }
 
 static void
@@ -539,6 +477,23 @@ done:
   return terminal;
 }
 
+static void
+free_renderer (char                 *device_path,
+               ply_renderer_t       *renderer,
+               ply_device_manager_t *manager)
+{
+  free_devices_from_device_path (manager, device_path);
+}
+
+static void
+free_renderers (ply_device_manager_t *manager)
+{
+  ply_hashtable_foreach (manager->renderers,
+                         (ply_hashtable_foreach_func_t *)
+                         free_renderer,
+                         manager);
+}
+
 ply_device_manager_t *
 ply_device_manager_new (const char                 *default_tty,
                         ply_device_manager_flags_t  flags)
@@ -548,8 +503,11 @@ ply_device_manager_new (const char                 *default_tty,
   manager = calloc (1, sizeof (ply_device_manager_t));
   manager->loop = NULL;
   manager->terminals = ply_hashtable_new (ply_hashtable_string_hash, ply_hashtable_string_compare);
+  manager->renderers = ply_hashtable_new (ply_hashtable_string_hash, ply_hashtable_string_compare);
   manager->local_console_terminal = ply_terminal_new (default_tty);
-  manager->seats = ply_list_new ();
+  manager->keyboards = ply_list_new ();
+  manager->text_displays = ply_list_new ();
+  manager->pixel_displays = ply_list_new ();
   manager->flags = flags;
 
   if (!(flags & PLY_DEVICE_MANAGER_FLAGS_IGNORE_UDEV))
@@ -572,11 +530,11 @@ ply_device_manager_free (ply_device_manager_t *manager)
                                          (ply_event_loop_exit_handler_t)
                                          detach_from_event_loop,
                                          manager);
-  free_seats (manager);
-  ply_list_free (manager->seats);
-
   free_terminals (manager);
   ply_hashtable_free (manager->terminals);
+
+  free_renderers (manager);
+  ply_hashtable_free (manager->renderers);
 
   if (manager->udev_monitor != NULL)
     udev_monitor_unref (manager->udev_monitor);
@@ -665,55 +623,147 @@ add_consoles_from_file (ply_device_manager_t *manager,
 }
 
 static void
-create_seat_for_terminal_and_renderer_type (ply_device_manager_t *manager,
-                                            const char           *device_path,
-                                            ply_terminal_t       *terminal,
-                                            ply_renderer_type_t   renderer_type)
+create_pixel_displays_for_renderer (ply_device_manager_t *manager,
+                                    ply_renderer_t       *renderer)
 {
-  ply_seat_t *seat;
-  bool is_local_terminal = false;
+  ply_list_t *heads;
+  ply_list_node_t *node;
 
-  if (terminal != NULL && manager->local_console_terminal == terminal)
-    is_local_terminal = true;
+  heads = ply_renderer_get_heads (renderer);
 
-  if (is_local_terminal && manager->local_console_seat != NULL)
+  ply_trace ("Adding displays for %d heads",
+             ply_list_get_length (heads));
+
+  node = ply_list_get_first_node (heads);
+  while (node != NULL)
     {
-      ply_trace ("trying to create seat for local console when one already exists");
-      return;
+      ply_list_node_t *next_node;
+      ply_renderer_head_t *head;
+      ply_pixel_display_t *display;
+
+      head = ply_list_node_get_data (node);
+      next_node = ply_list_get_next_node (heads, node);
+
+      display = ply_pixel_display_new (renderer, head);
+
+      ply_list_append_data (manager->pixel_displays, display);
+
+      if (manager->pixel_display_added_handler != NULL)
+        manager->pixel_display_added_handler (manager->event_handler_data, display);
+      node = next_node;
     }
-
-  ply_trace ("creating seat for %s (renderer type: %u) (terminal: %s)",
-             device_path? : "", renderer_type, terminal? ply_terminal_get_name (terminal): "none");
-  seat = ply_seat_new (terminal);
-
-  if (!ply_seat_open (seat, renderer_type, device_path))
-    {
-      ply_trace ("could not create seat");
-      ply_seat_free (seat);
-      return;
-    }
-
-  ply_list_append_data (manager->seats, seat);
-
-  if (is_local_terminal)
-    manager->local_console_seat = seat;
-
-  if (manager->seat_added_handler != NULL)
-    manager->seat_added_handler (manager->seat_event_handler_data, seat);
 }
 
 static void
-create_seat_for_terminal (const char           *device_path,
-                          ply_terminal_t       *terminal,
-                          ply_device_manager_t *manager)
+create_text_displays_for_terminal (ply_device_manager_t *manager,
+                                   ply_terminal_t       *terminal)
 {
-  create_seat_for_terminal_and_renderer_type (manager,
-                                              device_path,
-                                              terminal,
-                                              PLY_RENDERER_TYPE_NONE);
+  ply_text_display_t *display;
+
+  if (!ply_terminal_is_open (terminal))
+    {
+      if (!ply_terminal_open (terminal))
+        {
+          ply_trace ("could not add terminal %s: %m",
+                     ply_terminal_get_name (terminal));
+          return;
+        }
+    }
+
+  ply_trace ("adding text display for terminal %s",
+             ply_terminal_get_name (terminal));
+
+  display = ply_text_display_new (terminal);
+  ply_list_append_data (manager->text_displays, display);
+
+  if (manager->text_display_added_handler != NULL)
+    manager->text_display_added_handler (manager->event_handler_data, display);
+}
+
+static void
+create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
+                                               const char           *device_path,
+                                               ply_terminal_t       *terminal,
+                                               ply_renderer_type_t   renderer_type)
+{
+  ply_renderer_t *renderer = NULL;
+  ply_keyboard_t *keyboard = NULL;
+
+  renderer = ply_hashtable_lookup (manager->renderers, (void *) device_path);
+
+  if (renderer != NULL)
+    {
+      ply_trace ("ignoring device %s since it's already managed",
+                 device_path);
+      return;
+    }
+
+  ply_trace ("creating devices for %s (renderer type: %u) (terminal: %s)",
+             device_path? : "", renderer_type, terminal? ply_terminal_get_name (terminal): "none");
+
+  if (renderer_type != PLY_RENDERER_TYPE_NONE)
+    {
+      renderer = ply_renderer_new (renderer_type, device_path, terminal);
+
+      if (!ply_renderer_open (renderer))
+        {
+          ply_trace ("could not open renderer for %s", device_path);
+          ply_renderer_free (renderer);
+          renderer = NULL;
+          if (renderer_type != PLY_RENDERER_TYPE_AUTO)
+            return;
+        }
+    }
+
+  if (renderer != NULL)
+    {
+      keyboard = ply_keyboard_new_for_renderer (renderer);
+      ply_list_append_data (manager->keyboards, keyboard);
+
+      if (manager->keyboard_added_handler != NULL)
+        manager->keyboard_added_handler (manager->event_handler_data, keyboard);
+
+      create_pixel_displays_for_renderer (manager, renderer);
+      ply_hashtable_insert (manager->renderers, strdup (device_path), renderer);
+    }
+  else if (terminal != NULL)
+    {
+      keyboard = ply_keyboard_new_for_terminal (terminal);
+      ply_list_append_data (manager->keyboards, keyboard);
+
+      if (manager->keyboard_added_handler != NULL)
+        manager->keyboard_added_handler (manager->event_handler_data, keyboard);
+    }
+
+  if (terminal != NULL)
+    {
+      create_text_displays_for_terminal (manager, terminal);
+
+      if (terminal == manager->local_console_terminal)
+        {
+          manager->local_console_is_text = renderer == NULL;
+          manager->local_console_managed = true;
+        }
+    }
+
+  if (keyboard != NULL)
+    {
+      ply_keyboard_watch_for_input (keyboard);
+    }
+}
+
+static void
+create_devices_for_terminal (const char           *device_path,
+                             ply_terminal_t       *terminal,
+                             ply_device_manager_t *manager)
+{
+  create_devices_for_terminal_and_renderer_type (manager,
+                                                 device_path,
+                                                 terminal,
+                                                 PLY_RENDERER_TYPE_NONE);
 }
 static bool
-create_seats_from_terminals (ply_device_manager_t *manager)
+create_devices_from_terminals (ply_device_manager_t *manager)
 {
   bool has_serial_consoles;
 
@@ -732,9 +782,11 @@ create_seats_from_terminals (ply_device_manager_t *manager)
   if (has_serial_consoles)
     {
       ply_trace ("serial consoles detected, managing them with details forced");
+      manager->serial_consoles_detected = true;
+
       ply_hashtable_foreach (manager->terminals,
                              (ply_hashtable_foreach_func_t *)
-                             create_seat_for_terminal,
+                             create_devices_for_terminal,
                              manager);
       return true;
     }
@@ -743,32 +795,32 @@ create_seats_from_terminals (ply_device_manager_t *manager)
 }
 
 static void
-create_seats_from_udev (ply_device_manager_t *manager)
+create_devices_from_udev (ply_device_manager_t *manager)
 {
   bool found_drm_device, found_fb_device;
 
   ply_trace ("Looking for devices from udev");
 
-  found_drm_device = create_seats_for_subsystem (manager, SUBSYSTEM_DRM);
-  found_fb_device = create_seats_for_subsystem (manager, SUBSYSTEM_FRAME_BUFFER);
+  found_drm_device = create_devices_for_subsystem (manager, SUBSYSTEM_DRM);
+  found_fb_device = create_devices_for_subsystem (manager, SUBSYSTEM_FRAME_BUFFER);
 
   if (found_drm_device || found_fb_device)
     return;
 
-  ply_trace ("Creating non-graphical seat, since there's no suitable graphics hardware");
-  create_seat_for_terminal_and_renderer_type (manager,
-                                              ply_terminal_get_name (manager->local_console_terminal),
-                                              manager->local_console_terminal,
-                                              PLY_RENDERER_TYPE_NONE);
+  ply_trace ("Creating non-graphical devices, since there's no suitable graphics hardware");
+  create_devices_for_terminal_and_renderer_type (manager,
+                                                 ply_terminal_get_name (manager->local_console_terminal),
+                                                 manager->local_console_terminal,
+                                                 PLY_RENDERER_TYPE_NONE);
 }
 
 static void
-create_fallback_seat (ply_device_manager_t *manager)
+create_fallback_devices (ply_device_manager_t *manager)
 {
-  create_seat_for_terminal_and_renderer_type (manager,
-                                              ply_terminal_get_name (manager->local_console_terminal),
-                                              manager->local_console_terminal,
-                                              PLY_RENDERER_TYPE_AUTO);
+  create_devices_for_terminal_and_renderer_type (manager,
+                                                 ply_terminal_get_name (manager->local_console_terminal),
+                                                 manager->local_console_terminal,
+                                                 PLY_RENDERER_TYPE_AUTO);
 }
 
 static void
@@ -788,7 +840,7 @@ on_udev_queue_changed (ply_device_manager_t *manager)
 
   manager->udev_queue = NULL;
 
-  create_seats_from_udev (manager);
+  create_devices_from_udev (manager);
 }
 
 static void
@@ -802,7 +854,7 @@ watch_for_coldplug_completion (ply_device_manager_t *manager)
   if (udev_queue_get_queue_is_empty (manager->udev_queue))
     {
       ply_trace ("udev coldplug completed already ");
-      create_seats_from_udev (manager);
+      create_devices_from_udev (manager);
       return;
     }
 
@@ -814,7 +866,7 @@ watch_for_coldplug_completion (ply_device_manager_t *manager)
       ply_trace ("could not watch for udev to show up: %m");
       close (fd);
 
-      create_fallback_seat (manager);
+      create_fallback_devices (manager);
       return;
     }
 
@@ -831,28 +883,36 @@ watch_for_coldplug_completion (ply_device_manager_t *manager)
 }
 
 void
-ply_device_manager_watch_seats (ply_device_manager_t       *manager,
-                                ply_seat_added_handler_t    seat_added_handler,
-                                ply_seat_removed_handler_t  seat_removed_handler,
-                                void                       *data)
+ply_device_manager_watch_devices (ply_device_manager_t                *manager,
+                                  ply_keyboard_added_handler_t         keyboard_added_handler,
+                                  ply_keyboard_removed_handler_t       keyboard_removed_handler,
+                                  ply_pixel_display_added_handler_t    pixel_display_added_handler,
+                                  ply_pixel_display_removed_handler_t  pixel_display_removed_handler,
+                                  ply_text_display_added_handler_t     text_display_added_handler,
+                                  ply_text_display_removed_handler_t   text_display_removed_handler,
+                                  void                                *data)
 {
-  bool done_with_initial_seat_setup;
+  bool done_with_initial_devices_setup;
 
-  manager->seat_added_handler = seat_added_handler;
-  manager->seat_removed_handler = seat_removed_handler;
-  manager->seat_event_handler_data = data;
+  manager->keyboard_added_handler = keyboard_added_handler;
+  manager->keyboard_removed_handler = keyboard_removed_handler;
+  manager->pixel_display_added_handler = pixel_display_added_handler;
+  manager->pixel_display_removed_handler = pixel_display_removed_handler;
+  manager->text_display_added_handler = text_display_added_handler;
+  manager->text_display_removed_handler = text_display_removed_handler;
+  manager->event_handler_data = data;
 
-  /* Try to create seats for each serial device right away, if possible
+  /* Try to create devices for each serial device right away, if possible
    */
-  done_with_initial_seat_setup = create_seats_from_terminals (manager);
+  done_with_initial_devices_setup = create_devices_from_terminals (manager);
 
-  if (done_with_initial_seat_setup)
+  if (done_with_initial_devices_setup)
     return;
 
   if ((manager->flags & PLY_DEVICE_MANAGER_FLAGS_IGNORE_UDEV))
     {
-      ply_trace ("udev support disabled, creating fallback seat");
-      create_fallback_seat (manager);
+      ply_trace ("udev support disabled, creating fallback devices");
+      create_fallback_devices (manager);
       return;
     }
 
@@ -861,32 +921,28 @@ ply_device_manager_watch_seats (ply_device_manager_t       *manager,
 }
 
 bool
-ply_device_manager_has_open_seats (ply_device_manager_t *manager)
+ply_device_manager_has_displays (ply_device_manager_t *manager)
 {
-  ply_list_node_t *node;
-
-  node = ply_list_get_first_node (manager->seats);
-  while (node != NULL)
-    {
-      ply_seat_t *seat;
-      ply_list_node_t *next_node;
-
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-
-      if (ply_seat_is_open (seat))
-        return true;
-
-      node = next_node;
-    }
-
-  return false;
+  return ply_list_get_length (manager->pixel_displays) > 0 ||
+         ply_list_get_length (manager->text_displays) > 0;
 }
 
 ply_list_t *
-ply_device_manager_get_seats (ply_device_manager_t *manager)
+ply_device_manager_get_keyboards (ply_device_manager_t *manager)
 {
-  return manager->seats;
+  return manager->keyboards;
+}
+
+ply_list_t *
+ply_device_manager_get_pixel_displays (ply_device_manager_t *manager)
+{
+  return manager->pixel_displays;
+}
+
+ply_list_t *
+ply_device_manager_get_text_displays (ply_device_manager_t *manager)
+{
+  return manager->text_displays;
 }
 
 ply_terminal_t *
@@ -895,46 +951,46 @@ ply_device_manager_get_default_terminal (ply_device_manager_t *manager)
   return manager->local_console_terminal;
 }
 
+bool
+ply_device_manager_has_serial_consoles (ply_device_manager_t *manager)
+{
+  return manager->serial_consoles_detected;
+}
+
+static void
+activate_renderer (char                 *device_path,
+                   ply_renderer_t       *renderer,
+                   ply_device_manager_t *manager)
+{
+  ply_renderer_activate (renderer);
+}
+
 void
 ply_device_manager_activate_renderers (ply_device_manager_t *manager)
 {
-  ply_list_node_t *node;
-
   ply_trace ("activating renderers");
-  node = ply_list_get_first_node (manager->seats);
-  while (node != NULL)
-    {
-      ply_seat_t *seat;
-      ply_list_node_t *next_node;
+  ply_hashtable_foreach (manager->renderers,
+                         (ply_hashtable_foreach_func_t *)
+                         activate_renderer,
+                         manager);
+}
 
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-
-      ply_seat_activate_renderer (seat);
-
-      node = next_node;
-    }
+static void
+deactivate_renderer (char                 *device_path,
+                     ply_renderer_t       *renderer,
+                     ply_device_manager_t *manager)
+{
+  ply_renderer_deactivate (renderer);
 }
 
 void
 ply_device_manager_deactivate_renderers (ply_device_manager_t *manager)
 {
-  ply_list_node_t *node;
-
   ply_trace ("deactivating renderers");
-  node = ply_list_get_first_node (manager->seats);
-  while (node != NULL)
-    {
-      ply_seat_t *seat;
-      ply_list_node_t *next_node;
-
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
-
-      ply_seat_deactivate_renderer (seat);
-
-      node = next_node;
-    }
+  ply_hashtable_foreach (manager->renderers,
+                         (ply_hashtable_foreach_func_t *)
+                         deactivate_renderer,
+                         manager);
 }
 
 void
@@ -943,16 +999,16 @@ ply_device_manager_activate_keyboards (ply_device_manager_t *manager)
   ply_list_node_t *node;
 
   ply_trace ("activating keyboards");
-  node = ply_list_get_first_node (manager->seats);
+  node = ply_list_get_first_node (manager->keyboards);
   while (node != NULL)
     {
-      ply_seat_t *seat;
+      ply_keyboard_t *keyboard;
       ply_list_node_t *next_node;
 
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
+      keyboard = ply_list_node_get_data (node);
+      next_node = ply_list_get_next_node (manager->keyboards, node);
 
-      ply_seat_activate_keyboard (seat);
+      ply_keyboard_watch_for_input (keyboard);
 
       node = next_node;
     }
@@ -964,16 +1020,16 @@ ply_device_manager_deactivate_keyboards (ply_device_manager_t *manager)
   ply_list_node_t *node;
 
   ply_trace ("deactivating keyboards");
-  node = ply_list_get_first_node (manager->seats);
+  node = ply_list_get_first_node (manager->keyboards);
   while (node != NULL)
     {
-      ply_seat_t *seat;
+      ply_keyboard_t *keyboard;
       ply_list_node_t *next_node;
 
-      seat = ply_list_node_get_data (node);
-      next_node = ply_list_get_next_node (manager->seats, node);
+      keyboard = ply_list_node_get_data (node);
+      next_node = ply_list_get_next_node (manager->keyboards, node);
 
-      ply_seat_deactivate_keyboard (seat);
+      ply_keyboard_stop_watching_for_input (keyboard);
 
       node = next_node;
     }
