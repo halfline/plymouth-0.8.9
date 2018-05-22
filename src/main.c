@@ -57,7 +57,7 @@
 #include "ply-progress.h"
 
 #ifndef PLY_MAX_COMMAND_LINE_SIZE
-#define PLY_MAX_COMMAND_LINE_SIZE 512
+#define PLY_MAX_COMMAND_LINE_SIZE 4097
 #endif
 
 #define BOOT_DURATION_FILE     PLYMOUTH_TIME_DIRECTORY "/boot-duration"
@@ -1809,13 +1809,12 @@ get_kernel_command_line (state_t *state)
     }
 
   ply_trace ("reading kernel command line");
-  if (read (fd, state->kernel_command_line, sizeof (state->kernel_command_line)) < 0)
+  if (read (fd, state->kernel_command_line, sizeof (state->kernel_command_line) - 1) < 0)
     {
       ply_trace ("couldn't read it: %m");
       close (fd);
       return false;
     }
-
 
   /* we now use plymouth.argument for kernel commandline arguments.
    * It used to be plymouth:argument. This bit just rewrites all : to be .
