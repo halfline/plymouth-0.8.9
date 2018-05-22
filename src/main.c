@@ -1180,8 +1180,16 @@ on_hide_splash (state_t *state)
   if (state->is_inactive)
     return;
 
+  /* If the splash is NULL then we haven't shown it yet,
+   * but we still need to call hide splash so it won't show
+   * spontaneously after the splash delay later.
+   */
   if (state->boot_splash == NULL)
-    return;
+    {
+      ply_trace ("cancelling pending show splash operation (if any)");
+      hide_splash (state);
+      return;
+    }
 
   ply_trace ("hiding boot splash");
   dump_details_and_quit_splash (state);
