@@ -468,9 +468,14 @@ get_terminal (ply_device_manager_t *manager,
     asprintf (&full_name, "/dev/%s", device_name);
 
   if (strcmp (full_name, "/dev/tty0") == 0 ||
-      strcmp (full_name, "/dev/tty") == 0)
+      strcmp (full_name, "/dev/tty") == 0 ||
+      strcmp (full_name, ply_terminal_get_name (manager->local_console_terminal)) == 0)
     {
       terminal = manager->local_console_terminal;
+
+      ply_hashtable_insert (manager->terminals,
+                            (void *) ply_terminal_get_name (terminal),
+                            terminal);
       goto done;
     }
 
@@ -500,9 +505,6 @@ ply_device_manager_new (const char                 *default_tty,
   manager->loop = NULL;
   manager->terminals = ply_hashtable_new (ply_hashtable_string_hash, ply_hashtable_string_compare);
   manager->local_console_terminal = ply_terminal_new (default_tty);
-  ply_hashtable_insert (manager->terminals,
-                        (void *) ply_terminal_get_name (manager->local_console_terminal),
-                        manager->local_console_terminal);
   manager->seats = ply_list_new ();
   manager->flags = flags;
 
@@ -541,14 +543,14 @@ ply_device_manager_free (ply_device_manager_t *manager)
   free (manager);
 }
 
-static int
+static bool
 add_consoles_from_file (ply_device_manager_t *manager,
                         const char           *path)
 {
   int fd;
   char contents[512] = "";
   ssize_t contents_length;
-  int num_consoles;
+  bool has_serial_consoles;
   const char *remaining_file_contents;
 
   ply_trace ("opening %s", path);
@@ -557,7 +559,7 @@ add_consoles_from_file (ply_device_manager_t *manager,
   if (fd < 0)
     {
       ply_trace ("couldn't open it: %m");
-      return 0;
+      return false;
     }
 
   ply_trace ("reading file");
@@ -567,12 +569,12 @@ add_consoles_from_file (ply_device_manager_t *manager,
     {
       ply_trace ("couldn't read it: %m");
       close (fd);
-      return 0;
+      return false;
     }
   close (fd);
 
   remaining_file_contents = contents;
-  num_consoles = 0;
+  has_serial_consoles = false;
 
   while (remaining_file_contents < contents + contents_length)
     {
@@ -603,7 +605,9 @@ add_consoles_from_file (ply_device_manager_t *manager,
       free (console);
 
       ply_trace ("console %s found!", console_device);
-      num_consoles++;
+
+      if (terminal != manager->local_console_terminal)
+        has_serial_consoles = true;
 
       /* Move past the parsed console string, and the whitespace we
        * may have found above.  If we found a NUL above and not whitespace,
@@ -613,7 +617,7 @@ add_consoles_from_file (ply_device_manager_t *manager,
       remaining_file_contents += console_length + 1;
     }
 
-  return num_consoles;
+  return has_serial_consoles;
 }
 
 static void
@@ -667,24 +671,21 @@ create_seat_for_terminal (const char           *device_path,
 static bool
 create_seats_from_terminals (ply_device_manager_t *manager)
 {
-  int num_consoles;
+  bool has_serial_consoles;
 
   ply_trace ("checking for consoles");
 
   if (manager->flags & PLY_DEVICE_MANAGER_FLAGS_IGNORE_SERIAL_CONSOLES)
     {
-      num_consoles = 0;
+      has_serial_consoles = false;
       ply_trace ("ignoring all consoles but default console because explicitly told to.");
     }
   else
     {
-      num_consoles = add_consoles_from_file (manager, "/sys/class/tty/console/active");
-
-      if (num_consoles == 0)
-        ply_trace ("ignoring all consoles but default console because /sys/class/tty/console/active could not be read");
+      has_serial_consoles = add_consoles_from_file (manager, "/sys/class/tty/console/active");
     }
 
-  if (num_consoles > 1)
+  if (has_serial_consoles)
     {
       ply_trace ("serial consoles detected, managing them with details forced");
       ply_hashtable_foreach (manager->terminals,
