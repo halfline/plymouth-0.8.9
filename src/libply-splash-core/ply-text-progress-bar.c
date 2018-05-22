@@ -148,6 +148,30 @@ get_os_string (void)
               *pos2 = '\0';
             }
           asprintf (&os_string, " %s", pos);
+
+          /* For RHEL, overwrite variant because it's not reliable, see
+           * bug 911553
+           */
+          pos = strstr (os_string, "Red Hat Enterprise Linux ");
+
+          if (pos != NULL)
+            {
+              pos += strlen ("Red Hat Enterprise Linux ");
+
+              pos2 = strstr (pos, " ");
+
+              if (pos2 != NULL)
+                {
+                  pos2++;
+                  memmove (pos, pos2, strlen (pos2));
+                }
+            }
+
+          /* Trim out code names and dracut gook
+           */
+          pos = strstr (os_string, " (");
+          if (pos != NULL)
+            *pos = '\0';
         }
       goto out;
     }
