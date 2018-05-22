@@ -76,7 +76,7 @@ struct _ply_boot_splash_plugin
   ply_list_t *views;
   ply_boot_splash_display_type_t state;
   ply_list_t *messages;
-
+  ply_buffer_t *boot_buffer;
 };
 
 static view_t *
@@ -244,6 +244,16 @@ add_text_display (ply_boot_splash_plugin_t *plugin,
     ply_terminal_activate_vt (terminal);
 
   ply_list_append_data (plugin->views, view);
+
+  if (plugin->boot_buffer != NULL)
+    {
+      size_t size;
+      const char *bytes;
+
+      size = ply_buffer_get_size (plugin->boot_buffer);
+      bytes = ply_buffer_get_bytes (plugin->boot_buffer);
+      view_write (view, bytes, size);
+    }
 }
 
 static void
@@ -290,8 +300,9 @@ show_splash_screen (ply_boot_splash_plugin_t *plugin,
 
   if (boot_buffer)
     {
-      size = ply_buffer_get_size (boot_buffer);
+      plugin->boot_buffer = boot_buffer;
 
+      size = ply_buffer_get_size (boot_buffer);
       write_on_views (plugin, ply_buffer_get_bytes (boot_buffer), size);
     }
 

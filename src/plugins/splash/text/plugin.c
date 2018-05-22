@@ -485,6 +485,9 @@ add_text_display (ply_boot_splash_plugin_t *plugin,
                                      on_draw, view);
 
   ply_list_append_data (plugin->views, view);
+
+  if (plugin->is_animating)
+    view_start_animation (view);
 }
 
 static void

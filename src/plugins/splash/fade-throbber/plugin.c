@@ -103,6 +103,7 @@ struct _ply_boot_splash_plugin
   double now;
 
   uint32_t is_animating : 1;
+  uint32_t is_visible : 1;
 };
 
 ply_boot_splash_plugin_interface_t *ply_boot_splash_plugin_get_interface (void);
@@ -267,6 +268,8 @@ view_free (view_t *view)
   ply_label_free (view->message_label);
   free_stars (view);
 
+  ply_pixel_display_set_draw_handler (view->display, NULL, NULL);
+
   free (view);
 }
 
@@ -298,7 +301,14 @@ load_views (ply_boot_splash_plugin_t *plugin)
       next_node = ply_list_get_next_node (plugin->views, node);
 
       if (view_load (view))
-        view_loaded = true;
+        {
+          view_loaded = true;
+        }
+      else
+        {
+          ply_list_remove_node (plugin->views, node);
+          view_free (view);
+        }
 
       node = next_node;
     }
@@ -759,8 +769,17 @@ add_pixel_display (ply_boot_splash_plugin_t *plugin,
   ply_pixel_display_set_draw_handler (view->display,
                                       (ply_pixel_display_draw_handler_t)
                                       on_draw, view);
-
-  ply_list_append_data (plugin->views, view);
+  if (plugin->is_visible)
+    {
+      if (view_load (view))
+        ply_list_append_data (plugin->views, view);
+      else
+        view_free (view);
+    }
+  else
+    {
+      ply_list_append_data (plugin->views, view);
+    }
 }
 
 static void
@@ -780,8 +799,6 @@ remove_pixel_display (ply_boot_splash_plugin_t *plugin,
 
       if (view->display == display)
         {
-
-          ply_pixel_display_set_draw_handler (view->display, NULL, NULL);
           view_free (view);
           ply_list_remove_node (plugin->views, node);
           return;
@@ -824,6 +841,8 @@ show_splash_screen (ply_boot_splash_plugin_t *plugin,
       ply_trace ("couldn't load views");
       return false;
     }
+
+  plugin->is_visible = true;
 
   ply_trace ("starting boot animation");
   start_animation (plugin);
@@ -963,6 +982,8 @@ hide_splash_screen (ply_boot_splash_plugin_t *plugin,
                     ply_event_loop_t         *loop)
 {
   assert (plugin != NULL);
+
+  plugin->is_visible = false;
 
   if (plugin->loop != NULL)
     {

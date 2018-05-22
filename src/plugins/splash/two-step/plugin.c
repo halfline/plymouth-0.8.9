@@ -182,6 +182,8 @@ view_free (view_t *view)
   ply_label_free (view->label);
   ply_label_free (view->message_label);
 
+  ply_pixel_display_set_draw_handler (view->display, NULL, NULL);
+
   if (view->background_image != NULL)
     ply_image_free (view->background_image);
 
@@ -282,7 +284,14 @@ load_views (ply_boot_splash_plugin_t *plugin)
       next_node = ply_list_get_next_node (plugin->views, node);
 
       if (view_load (view))
-        view_loaded = true;
+        {
+          view_loaded = true;
+        }
+      else
+        {
+          ply_list_remove_node (plugin->views, node);
+          view_free (view);
+        }
 
       node = next_node;
     }
@@ -998,7 +1007,17 @@ add_pixel_display (ply_boot_splash_plugin_t *plugin,
   ply_pixel_display_set_draw_handler (view->display,
                                       (ply_pixel_display_draw_handler_t)
                                       on_draw, view);
-  ply_list_append_data (plugin->views, view);
+  if (plugin->is_visible)
+    {
+      if (view_load (view))
+        ply_list_append_data (plugin->views, view);
+      else
+        view_free (view);
+    }
+  else
+    {
+      ply_list_append_data (plugin->views, view);
+    }
 }
 
 static void
@@ -1020,7 +1039,6 @@ remove_pixel_display (ply_boot_splash_plugin_t *plugin,
       if (view->display == display)
         {
 
-          ply_pixel_display_set_draw_handler (view->display, NULL, NULL);
           view_free (view);
           ply_list_remove_node (plugin->views, node);
           return;
