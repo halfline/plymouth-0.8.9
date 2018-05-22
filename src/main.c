@@ -101,7 +101,6 @@ typedef struct
   ply_terminal_t *local_console_terminal;
   ply_device_manager_t *device_manager;
 
-  ply_trigger_t *show_trigger;
   ply_trigger_t *deactivate_trigger;
   ply_trigger_t *quit_trigger;
 
@@ -509,20 +508,23 @@ on_ask_for_password (state_t      *state,
 {
   ply_entry_trigger_t *entry_trigger;
 
-  /* Waiting to be shown, boot splash will
-   * arrive shortly so just sit tight
-   */
-  if (state->show_trigger != NULL)
+  if (state->boot_splash == NULL)
     {
-      ply_trace ("splash still coming up, waiting a bit");
-      cancel_pending_delayed_show (state);
-    }
-  else if (state->boot_splash == NULL)
-    {
-      /* No splash, client will have to get password */
-      ply_trace ("no splash loaded, replying immediately with no password");
-      ply_trigger_pull (answer, NULL);
-      return;
+      /* Waiting to be shown, boot splash will
+       * arrive shortly so just sit tight
+       */
+      if (state->is_shown)
+        {
+          ply_trace ("splash still coming up, waiting a bit");
+          cancel_pending_delayed_show (state);
+        }
+      else
+        {
+          /* No splash, client will have to get password */
+          ply_trace ("no splash loaded, replying immediately with no password");
+          ply_trigger_pull (answer, NULL);
+          return;
+        }
     }
 
   entry_trigger = calloc (1, sizeof (ply_entry_trigger_t));
@@ -872,8 +874,7 @@ plymouth_should_show_default_splash (state_t *state)
 }
 
 static void
-on_show_splash (state_t       *state,
-                ply_trigger_t *show_trigger)
+on_show_splash (state_t *state)
 {
   bool has_open_seats;
 
@@ -896,7 +897,6 @@ on_show_splash (state_t       *state,
       return;
     }
 
-  state->show_trigger = show_trigger;
   state->is_shown = true;
   has_open_seats = ply_device_manager_has_open_seats (state->device_manager);
 
@@ -983,13 +983,6 @@ show_splash (state_t *state)
     {
       show_detailed_splash (state);
       state->showing_details = true;
-    }
-
-  if (state->show_trigger != NULL)
-    {
-      ply_trace ("telling boot server about completed show operation");
-      ply_trigger_pull (state->show_trigger, NULL);
-      state->show_trigger = NULL;
     }
 }
 
