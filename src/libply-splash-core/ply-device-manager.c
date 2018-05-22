@@ -41,7 +41,7 @@
 #define SUBSYSTEM_DRM "drm"
 #define SUBSYSTEM_FRAME_BUFFER "graphics"
 
-static void create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
+static bool create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
                                                            const char           *device_path,
                                                            ply_terminal_t       *terminal,
                                                            ply_renderer_type_t   renderer_type);
@@ -161,11 +161,12 @@ fb_device_has_drm_device (ply_device_manager_t *manager,
   return has_drm_device;
 }
 
-static void
+static bool
 create_devices_for_udev_device (ply_device_manager_t *manager,
                                 struct udev_device   *device)
 {
   const char *device_path;
+  bool created = false;
 
   device_path = udev_device_get_devnode (device);
 
@@ -205,12 +206,13 @@ create_devices_for_udev_device (ply_device_manager_t *manager,
               terminal = manager->local_console_terminal;
             }
 
-          create_devices_for_terminal_and_renderer_type (manager,
-                                                         device_path,
-                                                         terminal,
-                                                         renderer_type);
+          created = create_devices_for_terminal_and_renderer_type (manager,
+                                                                   device_path,
+                                                                   terminal,
+                                                                   renderer_type);
        }
     }
+    return created;
 }
 
 static void
@@ -327,8 +329,7 @@ create_devices_for_subsystem (ply_device_manager_t *manager,
               if (node != NULL)
                 {
                   ply_trace ("found node %s", node);
-                  found_device = true;
-                  create_devices_for_udev_device (manager, device);
+                  found_device = create_devices_for_udev_device (manager, device);
                 }
             }
           else
@@ -682,7 +683,7 @@ create_text_displays_for_terminal (ply_device_manager_t *manager,
     manager->text_display_added_handler (manager->event_handler_data, display);
 }
 
-static void
+static bool
 create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
                                                const char           *device_path,
                                                ply_terminal_t       *terminal,
@@ -697,7 +698,7 @@ create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
     {
       ply_trace ("ignoring device %s since it's already managed",
                  device_path);
-      return;
+      return true;
     }
 
   ply_trace ("creating devices for %s (renderer type: %u) (terminal: %s)",
@@ -713,7 +714,7 @@ create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
           ply_renderer_free (renderer);
           renderer = NULL;
           if (renderer_type != PLY_RENDERER_TYPE_AUTO)
-            return;
+            return false;
         }
     }
 
@@ -759,6 +760,8 @@ create_devices_for_terminal_and_renderer_type (ply_device_manager_t *manager,
       ply_trace ("activating keyboards");
       ply_keyboard_watch_for_input (keyboard);
     }
+
+  return true;
 }
 
 static void
