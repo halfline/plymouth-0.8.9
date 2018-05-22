@@ -558,7 +558,7 @@ ply_terminal_session_stop_logging (ply_terminal_session_t *session)
   session->fd_watch = NULL;
 }
 
-bool 
+bool
 ply_terminal_session_open_log (ply_terminal_session_t *session,
                                const char             *filename)
 {
@@ -569,7 +569,6 @@ ply_terminal_session_open_log (ply_terminal_session_t *session,
   assert (session->logger != NULL);
 
   ply_save_errno ();
-  unlink (filename);
   log_is_opened = ply_logger_open_file (session->logger, filename, true);
   if (log_is_opened)
     ply_logger_flush (session->logger);
@@ -578,7 +577,7 @@ ply_terminal_session_open_log (ply_terminal_session_t *session,
   return log_is_opened;
 }
 
-void 
+void
 ply_terminal_session_close_log (ply_terminal_session_t *session)
 {
   assert (session != NULL);
