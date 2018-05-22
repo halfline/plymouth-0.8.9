@@ -115,6 +115,43 @@ device_is_for_local_console (ply_device_manager_t *manager,
 }
 
 static bool
+drm_device_in_use (ply_device_manager_t *manager,
+                   const char           *device_path)
+{
+  ply_list_node_t *node;
+
+  node = ply_list_get_first_node (manager->seats);
+  while (node != NULL)
+    {
+      ply_seat_t *seat;
+      ply_renderer_t *renderer;
+      ply_list_node_t *next_node;
+      const char *renderer_device_path;
+
+      seat = ply_list_node_get_data (node);
+      next_node = ply_list_get_next_node (manager->seats, node);
+      renderer = ply_seat_get_renderer (seat);
+
+      if (renderer != NULL)
+        {
+          renderer_device_path = ply_renderer_get_device_name (renderer);
+
+          if (renderer_device_path != NULL)
+            {
+              if (strcmp (device_path, renderer_device_path) == 0)
+                {
+                  return true;
+                }
+            }
+        }
+
+      node = next_node;
+    }
+
+  return false;
+}
+
+static bool
 fb_device_has_drm_device (ply_device_manager_t *manager,
                           struct udev_device   *fb_device)
 {
@@ -149,7 +186,7 @@ fb_device_has_drm_device (ply_device_manager_t *manager,
       card_path = udev_list_entry_get_name (card_entry);
       card_device = udev_device_new_from_syspath (manager->udev_context, card_path);
       card_node = udev_device_get_devnode (card_device);
-      if (card_node != NULL)
+      if (card_node != NULL && drm_device_in_use (manager, card_node))
         has_drm_device = true;
       else
         ply_trace ("no card node!");
@@ -369,7 +406,15 @@ on_udev_event (ply_device_manager_t *manager)
       if (strcmp (subsystem, SUBSYSTEM_DRM) == 0 ||
           coldplug_complete)
         {
-          create_seat_for_udev_device (manager, device);
+          ply_list_t *local_pixel_displays = NULL;
+
+          if (manager->local_console_seat != NULL)
+            local_pixel_displays = ply_seat_get_pixel_displays (manager->local_console_seat);
+
+          if (coldplug_complete && manager->local_console_seat != NULL && local_pixel_displays == NULL)
+            ply_trace ("ignoring since we're already using text splash for local console");
+          else
+            create_seat_for_udev_device (manager, device);
         }
       else
         {
@@ -442,7 +487,6 @@ free_terminal (char                 *device,
 {
   ply_hashtable_remove (manager->terminals, device);
 
-  ply_terminal_close (terminal);
   ply_terminal_free (terminal);
 }
 
